@@ -14,9 +14,13 @@ _RESEND_URL = "https://api.resend.com/emails"
 _TIMEOUT_SEGUNDOS = 10
 _RESEND_ERROR_BODY_MAX_BYTES = 8192
 _DIAGNOSTICO_MAX_CARACTERES = 240
+_REQUEST_ID_HEADERS = ("x-request-id", "request-id", "x-correlation-id", "cf-ray")
 _EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 _RESEND_KEY_RE = re.compile(r"\bre_[A-Za-z0-9_-]{8,}\b")
 _LONG_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_-]{32,}\b")
+_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
+_REQUEST_TOKEN_RE = re.compile(r"req_[A-Za-z0-9_-]{1,80}")
+_CF_RAY_RE = re.compile(r"[A-F0-9]{8,32}-[A-Z]{3}", re.IGNORECASE)
 _BEARER_RE = re.compile(r"\bBearer\s+\S+", re.IGNORECASE)
 _CREDENTIAL_ASSIGNMENT_RE = re.compile(
     r"\b(?:api[_ -]?key|access[_ -]?token|authorization|token)\b"
@@ -79,6 +83,8 @@ def _enviar_con_resend(reporte, configuracion):
         headers={
             "Authorization": f"Bearer {clave_api}",
             "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "SabanaCentroAguaComunidad/1.0",
         },
         method="POST",
     )
@@ -132,13 +138,61 @@ def _registrar_error_http_resend(error, reporte, configuracion_privada):
         nombre = _limpiar_diagnostico(respuesta.get("name"), valores_privados)
         mensaje = _limpiar_diagnostico(respuesta.get("message"), valores_privados)
 
+    if respuesta is None:
+        _LOGGER.warning(
+            "Resend rechazó la solicitud: http_status=%s content_type=%s "
+            "request_ids=%s message=non_json_response",
+            error.code,
+            _tipo_contenido_respuesta(error.headers),
+            _identificadores_solicitud(error.headers),
+        )
+        return
+
     _LOGGER.warning(
         "Resend rechazó la solicitud: http_status=%s statusCode=%s name=%s message=%s",
         error.code,
         status_code or "unknown",
         nombre or "unknown",
-        mensaje or ("non_json_response" if respuesta is None else "unavailable"),
+        mensaje or "unavailable",
     )
+
+
+def _tipo_contenido_respuesta(headers):
+    if headers is None or not hasattr(headers, "get"):
+        return "unknown"
+    valor = headers.get("Content-Type")
+    tipo = _limpiar_diagnostico(valor, ())
+    return tipo[:100] if tipo else "unknown"
+
+
+def _identificadores_solicitud(headers):
+    if headers is None or not hasattr(headers, "get"):
+        return "none"
+
+    identificadores = []
+    for nombre in _REQUEST_ID_HEADERS:
+        valor = headers.get(nombre)
+        if not isinstance(valor, str):
+            continue
+        valor = valor.strip()
+        if not re.fullmatch(r"[A-Za-z0-9._:-]{1,100}", valor):
+            continue
+        if (
+            _EMAIL_RE.search(valor)
+            or _RESEND_KEY_RE.search(valor)
+            or _BEARER_RE.search(valor)
+            or _CREDENTIAL_ASSIGNMENT_RE.search(valor)
+        ):
+            continue
+        if len(valor) >= 32 and not (
+            _UUID_RE.fullmatch(valor)
+            or _REQUEST_TOKEN_RE.fullmatch(valor)
+            or (nombre == "cf-ray" and _CF_RAY_RE.fullmatch(valor))
+        ):
+            continue
+        identificadores.append(f"{nombre}={valor}")
+
+    return ",".join(identificadores) or "none"
 
 
 def _limpiar_diagnostico(valor, valores_privados):

@@ -1,6 +1,7 @@
 import io
 import json
 import unittest
+from email.message import Message
 from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
@@ -292,7 +293,11 @@ class ReportesCiudadanosTests(unittest.TestCase):
         solicitud = abrir_url.call_args.args[0]
         self.assertEqual(solicitud.full_url, "https://api.resend.com/emails")
         self.assertEqual(solicitud.get_method(), "POST")
-        self.assertEqual(solicitud.get_header("Authorization"), "Bearer re_test_api_key")
+        cabeceras = {nombre.lower(): valor for nombre, valor in solicitud.header_items()}
+        self.assertEqual(cabeceras["authorization"], "Bearer re_test_api_key")
+        self.assertEqual(cabeceras["content-type"], "application/json")
+        self.assertEqual(cabeceras["accept"], "application/json")
+        self.assertEqual(cabeceras["user-agent"], "SabanaCentroAguaComunidad/1.0")
         self.assertEqual(abrir_url.call_args.kwargs["timeout"], 10)
         cuerpo = json.loads(solicitud.data)
         self.assertEqual(cuerpo["from"], "onboarding@resend.dev")
@@ -425,11 +430,16 @@ class ReportesCiudadanosTests(unittest.TestCase):
         )
         db.session.add(reporte)
         db.session.commit()
+        cabeceras = Message()
+        cabeceras["Content-Type"] = "text/html; charset=utf-8"
+        cabeceras["X-Request-Id"] = "req_abc123"
+        cabeceras["CF-Ray"] = "9edb1234567890ab-SJC"
+        cabeceras["X-Correlation-Id"] = "re_test_api_key"
         error_http = HTTPError(
             "https://api.resend.com/emails",
             403,
             "Forbidden",
-            None,
+            cabeceras,
             io.BytesIO(
                 "private@example.com re_test_api_key Descripción privada".encode("utf-8")
             ),
@@ -442,7 +452,11 @@ class ReportesCiudadanosTests(unittest.TestCase):
 
         diagnostico = "\n".join(registros.output)
         self.assertIn("http_status=403", diagnostico)
-        self.assertIn("statusCode=unknown", diagnostico)
+        self.assertIn("content_type=text/html; charset=utf-8", diagnostico)
+        self.assertIn(
+            "request_ids=x-request-id=req_abc123,cf-ray=9edb1234567890ab-SJC",
+            diagnostico,
+        )
         self.assertIn("message=non_json_response", diagnostico)
         self.assertNotIn("private@example.com", diagnostico)
         self.assertNotIn("re_test_api_key", diagnostico)
