@@ -258,9 +258,12 @@ class ReportesCiudadanosTests(unittest.TestCase):
             WTF_CSRF_ENABLED=True,
             RECAPTCHA_ENABLED=True,
             RECAPTCHA_SITE_KEY="site_key_test",
+            RECAPTCHA_SECRET_KEY="secret_key_test",
+            RECAPTCHA_ALLOWED_HOSTNAMES=("aguacomunidad.up.railway.app",),
         )
 
-        respuesta = self.client.get("/reporte-ciudadano")
+        with self.assertLogs("app.blueprints.reportes.routes", level="INFO") as registros:
+            respuesta = self.client.get("/reporte-ciudadano")
         html = respuesta.get_data(as_text=True)
         script = '<script src="https://www.google.com/recaptcha/api.js" async defer></script>'
 
@@ -268,7 +271,28 @@ class ReportesCiudadanosTests(unittest.TestCase):
         self.assertIn('name="csrf_token"', html)
         self.assertEqual(html.count(script), 1)
         self.assertEqual(html.count('class="g-recaptcha"'), 1)
+        self.assertIn('data-sitekey="site_key_test"', html)
         self.assertLess(html.index('class="g-recaptcha"'), html.index('id="enviar"'))
+        self.assertIn("habilitado=True clave_publica_presente=True", registros.output[0])
+        self.assertNotIn("secret_key_test", registros.output[0])
+
+    def test_configuracion_recaptcha_incompleta_muestra_indisponibilidad_segura(self):
+        self.app.config.update(
+            TESTING=False,
+            RECAPTCHA_ENABLED=True,
+            RECAPTCHA_SITE_KEY=None,
+            RECAPTCHA_SECRET_KEY="secret_key_test",
+            RECAPTCHA_ALLOWED_HOSTNAMES=("aguacomunidad.up.railway.app",),
+            RECAPTCHA_ALLOW_DISABLED=False,
+        )
+
+        respuesta = self.client.get("/reporte-ciudadano")
+        html = respuesta.get_data(as_text=True)
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertIn("La verificación de seguridad no está disponible", html)
+        self.assertNotIn('class="g-recaptcha"', html)
+        self.assertNotIn("recaptcha/api.js", html)
 
     def test_csrf_invalido_se_rechaza_antes_de_verificar_captcha(self):
         self.app.config.update(WTF_CSRF_ENABLED=True, RECAPTCHA_ENABLED=True)

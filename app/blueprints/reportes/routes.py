@@ -1,6 +1,6 @@
 import logging
 
-from flask import abort, flash, redirect, render_template, request, url_for
+from flask import abort, current_app, flash, redirect, render_template, request, url_for
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from wtforms import SelectChoice
@@ -21,6 +21,33 @@ from . import bp
 from .forms import ReporteCiudadanoForm
 
 logger = logging.getLogger(__name__)
+
+
+def _renderizar_formulario(form, status=200):
+    captcha_habilitado = current_app.config.get("RECAPTCHA_ENABLED") is True
+    clave_publica = current_app.config.get("RECAPTCHA_SITE_KEY")
+    hosts_permitidos = current_app.config.get("RECAPTCHA_ALLOWED_HOSTNAMES")
+    captcha_configurado = bool(
+        captcha_habilitado
+        and clave_publica
+        and current_app.config.get("RECAPTCHA_SECRET_KEY")
+        and hosts_permitidos
+    )
+    captcha_requerido = captcha_habilitado or not (
+        current_app.testing or current_app.config.get("RECAPTCHA_ALLOW_DISABLED", False)
+    )
+
+    return (
+        render_template(
+            "reportes/formulario.html",
+            form=form,
+            recaptcha_habilitado=captcha_habilitado,
+            recaptcha_clave_publica=clave_publica,
+            recaptcha_configurado=captcha_configurado,
+            recaptcha_requerido=captcha_requerido,
+        ),
+        status,
+    )
 
 
 def _error_base_datos():
@@ -64,20 +91,20 @@ def index():
                 "No fue posible validar la seguridad del formulario. Intenta de nuevo más tarde.",
                 "warning",
             )
-            return render_template("reportes/formulario.html", form=form), 503
+            return _renderizar_formulario(form, 503)
 
         if not captcha_valido:
             flash(
                 "Completa nuevamente la verificación antes de enviar el reporte.",
                 "warning",
             )
-            return render_template("reportes/formulario.html", form=form), 400
+            return _renderizar_formulario(form, 400)
 
         try:
             municipio = db.session.get(Municipio, form.municipio_id.data)
             if municipio is None:
                 form.municipio_id.errors.append("Selecciona un municipio válido.")
-                return render_template("reportes/formulario.html", form=form), 400
+                return _renderizar_formulario(form, 400)
 
             reporte = ReporteCiudadano(
                 municipio=municipio.nombre,
@@ -129,7 +156,13 @@ def index():
 
         return redirect(url_for("reportes.confirmacion"))
 
-    return render_template("reportes/formulario.html", form=form)
+    if request.method == "GET":
+        logger.info(
+            "reCAPTCHA al cargar formulario: habilitado=%s clave_publica_presente=%s",
+            current_app.config.get("RECAPTCHA_ENABLED") is True,
+            bool(current_app.config.get("RECAPTCHA_SITE_KEY")),
+        )
+    return _renderizar_formulario(form)
 
 
 @bp.route("/reporte-ciudadano/confirmacion")

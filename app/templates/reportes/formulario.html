@@ -31,9 +31,15 @@
       </div>
       {% endfor %}
 
-      {% if config.RECAPTCHA_ENABLED and config.RECAPTCHA_SITE_KEY %}
+      {% if recaptcha_habilitado and recaptcha_clave_publica %}
       <div class="mb-3 overflow-auto">
-        <div class="g-recaptcha" data-sitekey="{{ config.RECAPTCHA_SITE_KEY }}"></div>
+        <div class="g-recaptcha" data-sitekey="{{ recaptcha_clave_publica }}"></div>
+      </div>
+      {% endif %}
+
+      {% if recaptcha_requerido and not recaptcha_configurado %}
+      <div class="alert alert-warning" role="status">
+        La verificación de seguridad no está disponible en este momento. Inténtalo de nuevo más tarde.
       </div>
       {% endif %}
 
@@ -47,7 +53,7 @@
 {% endblock %}
 
 {% block scripts_extra %}
-{% if config.RECAPTCHA_ENABLED and config.RECAPTCHA_SITE_KEY %}
+{% if recaptcha_habilitado and recaptcha_clave_publica %}
 <script src="https://www.google.com/recaptcha/api.js" async defer></script>
 {% endif %}
 {% endblock %}
