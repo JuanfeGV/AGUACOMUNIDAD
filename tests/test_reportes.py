@@ -9,7 +9,7 @@ from sqlalchemy.exc import OperationalError
 
 from app import create_app
 from app.extensions import db
-from app.models import Municipio, ReporteCiudadano, Usuario
+from app.models import Articulo, Municipio, ReporteCiudadano, Usuario
 from app.services.semilla import MUNICIPIOS
 from app.services.notificaciones import (
     EmailAvisoEnvioError,
@@ -216,6 +216,40 @@ class ReportesCiudadanosTests(unittest.TestCase):
                 self.assertEqual(respuesta.status_code, 200)
                 for nombre, _, _ in MUNICIPIOS:
                     self.assertIn(nombre.encode(), respuesta.data)
+
+    def test_widget_jivo_se_carga_una_vez_en_paginas_publicas(self):
+        db.session.add(
+            Articulo(
+                titulo="Artículo de prueba",
+                slug="articulo-prueba",
+                contenido="Contenido de prueba.",
+                publicado=True,
+            )
+        )
+        db.session.commit()
+        paginas_publicas = (
+            "/",
+            "/municipios",
+            "/municipios/zipaquira",
+            "/aprende",
+            "/noticias",
+            "/noticias/articulo-prueba",
+            "/reporte-ciudadano",
+            "/buscar?q=agua",
+        )
+        script_widget = '<script src="https://code.jivosite.com/widget/24hKKfHR5b" async></script>'
+
+        for ruta in paginas_publicas:
+            with self.subTest(ruta=ruta):
+                respuesta = self.client.get(ruta)
+                html = respuesta.get_data(as_text=True)
+                self.assertEqual(respuesta.status_code, 200)
+                self.assertEqual(html.count(script_widget), 1)
+                self.assertLess(html.index(script_widget), html.rfind("</body>"))
+
+        respuesta_login = self.client.get("/ingresar")
+        self.assertEqual(respuesta_login.status_code, 200)
+        self.assertNotIn(script_widget, respuesta_login.get_data(as_text=True))
 
     def test_selector_de_municipio_filtra_el_listado(self):
         respuesta = self.client.get("/municipios?municipio=chia")

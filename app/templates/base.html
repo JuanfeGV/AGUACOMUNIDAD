@@ -87,5 +87,8 @@
 
   <script src="{{ url_for('static', filename='vendor/bootstrap/bootstrap.bundle.min.js') }}"></script>
   {% block scripts_extra %}{% endblock %}
+  {% if request.blueprint in ['main', 'municipios', 'aprende', 'noticias', 'reportes', 'busqueda'] %}
+  <script src="https://code.jivosite.com/widget/24hKKfHR5b" async></script>
+  {% endif %}
 </body>
 </html>
