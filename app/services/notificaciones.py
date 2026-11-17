@@ -1,4 +1,6 @@
 import json
+import logging
+import re
 import smtplib
 import ssl
 from email.message import EmailMessage
@@ -10,6 +12,18 @@ from flask import current_app
 
 _RESEND_URL = "https://api.resend.com/emails"
 _TIMEOUT_SEGUNDOS = 10
+_RESEND_ERROR_BODY_MAX_BYTES = 8192
+_DIAGNOSTICO_MAX_CARACTERES = 240
+_EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+_RESEND_KEY_RE = re.compile(r"\bre_[A-Za-z0-9_-]{8,}\b")
+_LONG_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_-]{32,}\b")
+_BEARER_RE = re.compile(r"\bBearer\s+\S+", re.IGNORECASE)
+_CREDENTIAL_ASSIGNMENT_RE = re.compile(
+    r"\b(?:api[_ -]?key|access[_ -]?token|authorization|token)\b"
+    r"\s*[:=]\s*[\"']?[A-Za-z0-9._~+/-]+",
+    re.IGNORECASE,
+)
+_LOGGER = logging.getLogger(__name__)
 
 
 class EmailAvisoNoConfiguradoError(RuntimeError):
@@ -75,9 +89,80 @@ def _enviar_con_resend(reporte, configuracion):
             if not 200 <= estado_http < 300:
                 raise EmailAvisoEnvioError("resend", estado_http)
     except HTTPError as error:
+        _registrar_error_http_resend(
+            error,
+            reporte,
+            (clave_api, remitente, destinatario),
+        )
         raise EmailAvisoEnvioError("resend", error.code) from None
     except (URLError, TimeoutError, OSError):
         raise EmailAvisoEnvioError("resend") from None
+
+
+def _registrar_error_http_resend(error, reporte, configuracion_privada):
+    try:
+        contenido = error.read(_RESEND_ERROR_BODY_MAX_BYTES).decode("utf-8")
+        respuesta = json.loads(contenido)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        respuesta = None
+
+    status_code = None
+    nombre = None
+    mensaje = None
+    if isinstance(respuesta, dict):
+        valor_status = respuesta.get("statusCode")
+        if (
+            isinstance(valor_status, int)
+            and not isinstance(valor_status, bool)
+            and 100 <= valor_status <= 599
+        ):
+            status_code = str(valor_status)
+        elif isinstance(valor_status, str) and re.fullmatch(r"[1-5]\d{2}", valor_status):
+            status_code = valor_status
+
+        valores_privados = [
+            *configuracion_privada,
+            _asunto_reporte(reporte),
+            _contenido_reporte(reporte),
+            reporte.municipio,
+            reporte.barrio,
+            reporte.tipo_falla,
+            reporte.descripcion,
+        ]
+        nombre = _limpiar_diagnostico(respuesta.get("name"), valores_privados)
+        mensaje = _limpiar_diagnostico(respuesta.get("message"), valores_privados)
+
+    _LOGGER.warning(
+        "Resend rechazó la solicitud: http_status=%s statusCode=%s name=%s message=%s",
+        error.code,
+        status_code or "unknown",
+        nombre or "unknown",
+        mensaje or ("non_json_response" if respuesta is None else "unavailable"),
+    )
+
+
+def _limpiar_diagnostico(valor, valores_privados):
+    if not isinstance(valor, str):
+        return None
+
+    texto = valor
+    for valor_privado in valores_privados:
+        if isinstance(valor_privado, str) and len(valor_privado) >= 3:
+            texto = re.sub(
+                re.escape(valor_privado),
+                "[redacted]",
+                texto,
+                flags=re.IGNORECASE,
+            )
+
+    texto = _CREDENTIAL_ASSIGNMENT_RE.sub("[redacted credential]", texto)
+    texto = _BEARER_RE.sub("[redacted token]", texto)
+    texto = _RESEND_KEY_RE.sub("[redacted token]", texto)
+    texto = _LONG_TOKEN_RE.sub("[redacted token]", texto)
+    texto = _EMAIL_RE.sub("[redacted email]", texto)
+    texto = re.sub(r"[\x00-\x1f\x7f]+", " ", texto)
+    texto = re.sub(r"\s+", " ", texto).strip()
+    return texto[:_DIAGNOSTICO_MAX_CARACTERES]
 
 
 def _enviar_con_smtp(reporte, configuracion):

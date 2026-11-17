@@ -344,6 +344,110 @@ class ReportesCiudadanosTests(unittest.TestCase):
         self.assertNotIn("re_test_api_key", str(error.exception))
         self.assertNotIn("private provider response", str(error.exception))
 
+    def test_resend_http_errors_registran_diagnostico_seguro(self):
+        self.app.config.update(
+            EMAIL_PROVIDER="resend",
+            RESEND_API_KEY="re_test_api_key",
+            RESEND_FROM="onboarding@resend.dev",
+            EMAIL_REPORTS_TO="reportes@example.com",
+        )
+        reporte = ReporteCiudadano(
+            municipio="Zipaquirá",
+            barrio="Centro",
+            tipo_falla="fuga",
+            descripcion="Descripción privada",
+        )
+        db.session.add(reporte)
+        db.session.commit()
+        respuestas = (
+            (401, "invalid_api_key"),
+            (403, "validation_error"),
+            (422, "unprocessable_entity"),
+        )
+
+        for codigo, nombre in respuestas:
+            with self.subTest(codigo=codigo):
+                cuerpo = json.dumps(
+                    {
+                        "statusCode": codigo,
+                        "name": nombre,
+                        "message": (
+                            "Diagnostic cause; private@example.com; "
+                            "Bearer re_test_api_key; API key=re_test_api_key; "
+                            "unlabelledtoken123456789012345678901234567890; "
+                            "Zipaquirá; Centro; fuga; Descripción privada"
+                        ),
+                    }
+                ).encode("utf-8")
+                error_http = HTTPError(
+                    "https://api.resend.com/emails",
+                    codigo,
+                    "Request rejected",
+                    None,
+                    io.BytesIO(cuerpo),
+                )
+
+                with self.assertLogs("app.services.notificaciones", level="WARNING") as registros:
+                    with patch("app.services.notificaciones.urlopen", side_effect=error_http):
+                        with self.assertRaises(EmailAvisoEnvioError):
+                            enviar_aviso_reporte(reporte)
+
+                diagnostico = "\n".join(registros.output)
+                self.assertIn(f"http_status={codigo}", diagnostico)
+                self.assertIn(f"statusCode={codigo}", diagnostico)
+                self.assertIn(f"name={nombre}", diagnostico)
+                self.assertIn("Diagnostic cause", diagnostico)
+                for dato_privado in (
+                    "re_test_api_key",
+                    "unlabelledtoken123456789012345678901234567890",
+                    "private@example.com",
+                    "onboarding@resend.dev",
+                    "reportes@example.com",
+                    "Zipaquirá",
+                    "Centro",
+                    "fuga",
+                    "Descripción privada",
+                ):
+                    self.assertNotIn(dato_privado, diagnostico)
+
+    def test_resend_respuesta_no_json_registra_diagnostico_generico_seguro(self):
+        self.app.config.update(
+            EMAIL_PROVIDER="resend",
+            RESEND_API_KEY="re_test_api_key",
+            RESEND_FROM="onboarding@resend.dev",
+            EMAIL_REPORTS_TO="reportes@example.com",
+        )
+        reporte = ReporteCiudadano(
+            municipio="Zipaquirá",
+            barrio="Centro",
+            tipo_falla="fuga",
+            descripcion="Descripción privada",
+        )
+        db.session.add(reporte)
+        db.session.commit()
+        error_http = HTTPError(
+            "https://api.resend.com/emails",
+            403,
+            "Forbidden",
+            None,
+            io.BytesIO(
+                "private@example.com re_test_api_key Descripción privada".encode("utf-8")
+            ),
+        )
+
+        with self.assertLogs("app.services.notificaciones", level="WARNING") as registros:
+            with patch("app.services.notificaciones.urlopen", side_effect=error_http):
+                with self.assertRaises(EmailAvisoEnvioError):
+                    enviar_aviso_reporte(reporte)
+
+        diagnostico = "\n".join(registros.output)
+        self.assertIn("http_status=403", diagnostico)
+        self.assertIn("statusCode=unknown", diagnostico)
+        self.assertIn("message=non_json_response", diagnostico)
+        self.assertNotIn("private@example.com", diagnostico)
+        self.assertNotIn("re_test_api_key", diagnostico)
+        self.assertNotIn("Descripción privada", diagnostico)
+
     def test_resend_falla_de_red_y_timeout_sin_exponer_detalles(self):
         self.app.config.update(
             EMAIL_PROVIDER="resend",
