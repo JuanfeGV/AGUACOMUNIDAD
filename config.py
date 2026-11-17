@@ -5,6 +5,14 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
+DESARROLLO_LOCAL = not any(
+    os.environ.get(nombre)
+    for nombre in (
+        "RAILWAY_ENVIRONMENT",
+        "RAILWAY_ENVIRONMENT_NAME",
+        "RAILWAY_PUBLIC_DOMAIN",
+    )
+)
 
 
 def _url_base_de_datos():
@@ -24,6 +32,14 @@ class Config:
     EMAIL_PROVIDER = os.environ.get("EMAIL_PROVIDER", "smtp").strip().lower()
     RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
     RESEND_FROM = os.environ.get("RESEND_FROM")
+    RECAPTCHA_ENABLED = os.environ.get("RECAPTCHA_ENABLED", "0").strip() == "1"
+    RECAPTCHA_SITE_KEY = os.environ.get("RECAPTCHA_SITE_KEY")
+    RECAPTCHA_SECRET_KEY = os.environ.get("RECAPTCHA_SECRET_KEY")
+    RECAPTCHA_ALLOWED_HOSTNAMES = tuple(
+        hostname.strip()
+        for hostname in os.environ.get("RECAPTCHA_ALLOWED_HOSTNAMES", "").split(",")
+        if hostname.strip()
+    )
     SMTP_SERVER = os.environ.get("SMTP_SERVER")
     SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
     SMTP_USE_TLS = os.environ.get("SMTP_USE_TLS", "1") == "1"
@@ -48,10 +64,12 @@ class Config:
 
 class DevelopmentConfig(Config):
     DEBUG = True
+    RECAPTCHA_ALLOW_DISABLED = DESARROLLO_LOCAL
 
 
 class ProductionConfig(Config):
     DEBUG = False
+    RECAPTCHA_ALLOW_DISABLED = False
 
 
 config_por_entorno = {

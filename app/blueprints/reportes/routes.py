@@ -1,6 +1,6 @@
 import logging
 
-from flask import abort, flash, redirect, render_template, url_for
+from flask import abort, flash, redirect, render_template, request, url_for
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from wtforms import SelectChoice
@@ -11,6 +11,11 @@ from ...services.notificaciones import (
     EmailAvisoEnvioError,
     EmailAvisoNoConfiguradoError,
     enviar_aviso_reporte,
+)
+from ...services.recaptcha import (
+    RecaptchaConfiguracionError,
+    RecaptchaNoDisponibleError,
+    verificar_token_recaptcha,
 )
 from . import bp
 from .forms import ReporteCiudadanoForm
@@ -49,6 +54,24 @@ def index():
     if form.validate_on_submit():
         if form.sitio_web.data:
             abort(400)
+
+        try:
+            captcha_valido = verificar_token_recaptcha(
+                request.form.get("g-recaptcha-response", "")
+            )
+        except (RecaptchaConfiguracionError, RecaptchaNoDisponibleError):
+            flash(
+                "No fue posible validar la seguridad del formulario. Intenta de nuevo más tarde.",
+                "warning",
+            )
+            return render_template("reportes/formulario.html", form=form), 503
+
+        if not captcha_valido:
+            flash(
+                "Completa nuevamente la verificación antes de enviar el reporte.",
+                "warning",
+            )
+            return render_template("reportes/formulario.html", form=form), 400
 
         try:
             municipio = db.session.get(Municipio, form.municipio_id.data)

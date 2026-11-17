@@ -16,6 +16,10 @@ from app.services.notificaciones import (
     EmailAvisoNoConfiguradoError,
     enviar_aviso_reporte,
 )
+from app.services.recaptcha import (
+    RecaptchaConfiguracionError,
+    RecaptchaNoDisponibleError,
+)
 from app.utils.texto import crear_slug
 from config import DevelopmentConfig
 
@@ -28,6 +32,9 @@ class ReportesCiudadanosTests(unittest.TestCase):
         self.app.config.update(
             TESTING=True,
             WTF_CSRF_ENABLED=False,
+            RECAPTCHA_ENABLED=False,
+            RECAPTCHA_SITE_KEY=None,
+            RECAPTCHA_SECRET_KEY=None,
         )
         self.context = self.app.app_context()
         self.context.push()
@@ -171,6 +178,118 @@ class ReportesCiudadanosTests(unittest.TestCase):
         self.assertEqual(ReporteCiudadano.query.count(), 1)
         self.assertIn(b"no se pudo enviar el aviso por correo", respuesta.data)
         enviar_aviso.assert_called_once()
+
+    def test_captcha_valido_conserva_el_guardado_y_notificacion(self):
+        self.app.config.update(
+            RECAPTCHA_ENABLED=True,
+            RECAPTCHA_SITE_KEY="site_key_test",
+            RECAPTCHA_SECRET_KEY="secret_key_test",
+            RECAPTCHA_ALLOWED_HOSTNAMES=("aguacomunidad.up.railway.app",),
+            EMAIL_PROVIDER="resend",
+        )
+        with patch(
+            "app.blueprints.reportes.routes.verificar_token_recaptcha",
+            return_value=True,
+        ) as verificar_captcha:
+            with patch(
+                "app.blueprints.reportes.routes.enviar_aviso_reporte",
+                return_value="resend",
+            ) as enviar_aviso:
+                respuesta = self.client.post(
+                    "/reporte-ciudadano",
+                    data={
+                        "municipio_id": "1",
+                        "barrio": "Centro",
+                        "tipo_falla": "fuga",
+                        "descripcion": "Hay una fuga visible frente al parque central.",
+                        "sitio_web": "",
+                        "g-recaptcha-response": "token-valido-de-prueba",
+                    },
+                    follow_redirects=True,
+                )
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertEqual(ReporteCiudadano.query.count(), 1)
+        self.assertIn(b"Resend acept", respuesta.data)
+        verificar_captcha.assert_called_once_with("token-valido-de-prueba")
+        enviar_aviso.assert_called_once()
+
+    def test_captcha_fallido_o_indisponible_no_guarda_ni_notifica(self):
+        casos = (
+            (False, 400, b"Completa nuevamente la verificaci"),
+            (RecaptchaNoDisponibleError(), 503, b"No fue posible validar la seguridad"),
+            (RecaptchaConfiguracionError(), 503, b"No fue posible validar la seguridad"),
+        )
+        self.app.config.update(
+            RECAPTCHA_ENABLED=True,
+            RECAPTCHA_SITE_KEY="site_key_test",
+            RECAPTCHA_SECRET_KEY="secret_key_test",
+            RECAPTCHA_ALLOWED_HOSTNAMES=("aguacomunidad.up.railway.app",),
+        )
+
+        for resultado, estado, mensaje in casos:
+            with self.subTest(resultado=type(resultado).__name__):
+                with patch(
+                    "app.blueprints.reportes.routes.verificar_token_recaptcha",
+                    side_effect=resultado if isinstance(resultado, Exception) else None,
+                    return_value=resultado if not isinstance(resultado, Exception) else None,
+                ) as verificar_captcha:
+                    with patch("app.blueprints.reportes.routes.enviar_aviso_reporte") as enviar_aviso:
+                        respuesta = self.client.post(
+                            "/reporte-ciudadano",
+                            data={
+                                "municipio_id": "1",
+                                "barrio": "Centro",
+                                "tipo_falla": "fuga",
+                                "descripcion": "Hay una fuga visible frente al parque central.",
+                                "sitio_web": "",
+                                "g-recaptcha-response": "token-invalido-de-prueba",
+                            },
+                        )
+
+                self.assertEqual(respuesta.status_code, estado)
+                self.assertEqual(ReporteCiudadano.query.count(), 0)
+                self.assertIn(mensaje, respuesta.data)
+                verificar_captcha.assert_called_once_with("token-invalido-de-prueba")
+                enviar_aviso.assert_not_called()
+
+    def test_formulario_muestra_un_widget_recaptcha_y_conserva_csrf(self):
+        self.app.config.update(
+            WTF_CSRF_ENABLED=True,
+            RECAPTCHA_ENABLED=True,
+            RECAPTCHA_SITE_KEY="site_key_test",
+        )
+
+        respuesta = self.client.get("/reporte-ciudadano")
+        html = respuesta.get_data(as_text=True)
+        script = '<script src="https://www.google.com/recaptcha/api.js" async defer></script>'
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertIn('name="csrf_token"', html)
+        self.assertEqual(html.count(script), 1)
+        self.assertEqual(html.count('class="g-recaptcha"'), 1)
+        self.assertLess(html.index('class="g-recaptcha"'), html.index('id="enviar"'))
+
+    def test_csrf_invalido_se_rechaza_antes_de_verificar_captcha(self):
+        self.app.config.update(WTF_CSRF_ENABLED=True, RECAPTCHA_ENABLED=True)
+        with patch("app.blueprints.reportes.routes.verificar_token_recaptcha") as verificar_captcha:
+            with patch("app.blueprints.reportes.routes.enviar_aviso_reporte") as enviar_aviso:
+                respuesta = self.client.post(
+                    "/reporte-ciudadano",
+                    data={
+                        "municipio_id": "1",
+                        "barrio": "Centro",
+                        "tipo_falla": "fuga",
+                        "descripcion": "Hay una fuga visible frente al parque central.",
+                        "sitio_web": "",
+                        "g-recaptcha-response": "token-valido-de-prueba",
+                    },
+                )
+
+        self.assertEqual(respuesta.status_code, 400)
+        self.assertEqual(ReporteCiudadano.query.count(), 0)
+        verificar_captcha.assert_not_called()
+        enviar_aviso.assert_not_called()
 
     def test_bandeja_de_reportes_exige_sesion_de_administrador(self):
         respuesta = self.client.get("/admin/reportes")
