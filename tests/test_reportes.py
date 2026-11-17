@@ -237,7 +237,7 @@ class ReportesCiudadanosTests(unittest.TestCase):
             "/reporte-ciudadano",
             "/buscar?q=agua",
         )
-        script_widget = '<script src="https://code.jivosite.com/widget/24hKKfHR5b" async></script>'
+        script_widget = '<script src="https://code.jivosite.com/widget/ZtT9rgXw3h" async></script>'
 
         for ruta in paginas_publicas:
             with self.subTest(ruta=ruta):
