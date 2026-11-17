@@ -1,5 +1,4 @@
 import logging
-import smtplib
 
 from flask import abort, flash, redirect, render_template, url_for
 from sqlalchemy import select
@@ -8,7 +7,11 @@ from wtforms import SelectChoice
 
 from ...extensions import db
 from ...models import Municipio, ReporteCiudadano
-from ...services.notificaciones import EmailAvisoNoConfiguradoError, enviar_aviso_reporte
+from ...services.notificaciones import (
+    EmailAvisoEnvioError,
+    EmailAvisoNoConfiguradoError,
+    enviar_aviso_reporte,
+)
 from . import bp
 from .forms import ReporteCiudadanoForm
 
@@ -34,7 +37,7 @@ def index():
         municipios = db.session.scalars(select(Municipio).order_by(Municipio.nombre)).all()
     except SQLAlchemyError:
         db.session.rollback()
-        logger.exception("No se pudieron consultar los municipios para el formulario de reportes.")
+        logger.error("No se pudieron consultar los municipios para el formulario de reportes.")
         return _error_base_datos()
 
     form.municipio_id.choices = [
@@ -63,25 +66,43 @@ def index():
             db.session.commit()
         except SQLAlchemyError:
             db.session.rollback()
-            logger.exception("No se pudo guardar el reporte ciudadano.")
+            logger.error("No se pudo guardar el reporte ciudadano.")
             return _error_base_datos()
 
         try:
-            enviar_aviso_reporte(reporte)
-        except EmailAvisoNoConfiguradoError:
-            logger.warning("No se envió aviso por correo para el reporte %s: falta configuración SMTP.", reporte.id)
+            proveedor = enviar_aviso_reporte(reporte)
+        except EmailAvisoNoConfiguradoError as error:
+            logger.warning(
+                "No se envió aviso por correo: falta configuración (proveedor=%s).",
+                error.proveedor,
+            )
             flash(
                 "Tu reporte quedó registrado, pero el aviso por correo está pendiente de configuración.",
                 "warning",
             )
-        except (OSError, smtplib.SMTPException):
-            logger.exception("No se pudo enviar el aviso por correo para el reporte %s.", reporte.id)
+        except EmailAvisoEnvioError as error:
+            logger.warning(
+                "No se pudo enviar el aviso por correo (proveedor=%s, estado_http=%s).",
+                error.proveedor,
+                error.estado_http,
+            )
             flash(
                 "Tu reporte quedó registrado, pero no se pudo enviar el aviso por correo.",
                 "warning",
             )
         else:
-            flash("Tu reporte quedó registrado y se notificó al equipo.", "success")
+            if proveedor == "resend":
+                flash(
+                    "Tu reporte quedó registrado y Resend aceptó la solicitud de envío. "
+                    "Esto no confirma la entrega del correo.",
+                    "success",
+                )
+            else:
+                flash(
+                    "Tu reporte quedó registrado y el servidor SMTP aceptó el mensaje para envío. "
+                    "Esto no confirma la entrega del correo.",
+                    "success",
+                )
 
         return redirect(url_for("reportes.confirmacion"))
 

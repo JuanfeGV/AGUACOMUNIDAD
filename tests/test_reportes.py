@@ -1,4 +1,7 @@
+import io
+import json
 import unittest
+from urllib.error import HTTPError, URLError
 from unittest.mock import patch
 
 from sqlalchemy.exc import OperationalError
@@ -7,7 +10,11 @@ from app import create_app
 from app.extensions import db
 from app.models import Municipio, ReporteCiudadano, Usuario
 from app.services.semilla import MUNICIPIOS
-from app.services.notificaciones import EmailAvisoNoConfiguradoError, enviar_aviso_reporte
+from app.services.notificaciones import (
+    EmailAvisoEnvioError,
+    EmailAvisoNoConfiguradoError,
+    enviar_aviso_reporte,
+)
 from app.utils.texto import crear_slug
 from config import DevelopmentConfig
 
@@ -141,6 +148,29 @@ class ReportesCiudadanosTests(unittest.TestCase):
         self.assertEqual(ReporteCiudadano.query.count(), 1)
         self.assertIn(b"el aviso por correo est", respuesta.data)
 
+    def test_error_de_notificacion_no_duplica_el_reporte_y_muestra_aviso(self):
+        self.app.config["EMAIL_PROVIDER"] = "resend"
+        with patch(
+            "app.blueprints.reportes.routes.enviar_aviso_reporte",
+            side_effect=EmailAvisoEnvioError("resend", 401),
+        ) as enviar_aviso:
+            respuesta = self.client.post(
+                "/reporte-ciudadano",
+                data={
+                    "municipio_id": "1",
+                    "barrio": "Centro",
+                    "tipo_falla": "fuga",
+                    "descripcion": "Hay una fuga visible frente al parque central.",
+                    "sitio_web": "",
+                },
+                follow_redirects=True,
+            )
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertEqual(ReporteCiudadano.query.count(), 1)
+        self.assertIn(b"no se pudo enviar el aviso por correo", respuesta.data)
+        enviar_aviso.assert_called_once()
+
     def test_bandeja_de_reportes_exige_sesion_de_administrador(self):
         respuesta = self.client.get("/admin/reportes")
 
@@ -211,6 +241,7 @@ class ReportesCiudadanosTests(unittest.TestCase):
 
     def test_aviso_email_se_envia_con_starttls(self):
         self.app.config.update(
+            EMAIL_PROVIDER="smtp",
             SMTP_SERVER="smtp.example.com",
             SMTP_PORT=587,
             SMTP_USE_TLS=True,
@@ -234,8 +265,152 @@ class ReportesCiudadanosTests(unittest.TestCase):
         smtp = smtp_factory.return_value.__enter__.return_value
         smtp.starttls.assert_called_once()
         mensaje = smtp.send_message.call_args.args[0]
+        self.assertEqual(mensaje["Subject"], f"Nuevo reporte ciudadano #{reporte.id} - AguaComunidad")
         self.assertEqual(mensaje["To"], "aguacomunidadsabana@gmail.com")
         self.assertIn("Zipaquirá", mensaje.get_content())
+
+    def test_resend_envia_reporte_por_https_con_campos_requeridos(self):
+        self.app.config.update(
+            EMAIL_PROVIDER="resend",
+            RESEND_API_KEY="re_test_api_key",
+            RESEND_FROM="onboarding@resend.dev",
+            EMAIL_REPORTS_TO="reportes@example.com",
+        )
+        reporte = ReporteCiudadano(
+            municipio="Zipaquirá",
+            barrio="Centro",
+            tipo_falla="fuga",
+            descripcion="Hay una fuga visible frente al parque central.",
+        )
+        db.session.add(reporte)
+        db.session.commit()
+
+        with patch("app.services.notificaciones.urlopen", return_value=io.BytesIO(b'{"id":"email_123"}')) as abrir_url:
+            proveedor = enviar_aviso_reporte(reporte)
+
+        self.assertEqual(proveedor, "resend")
+        solicitud = abrir_url.call_args.args[0]
+        self.assertEqual(solicitud.full_url, "https://api.resend.com/emails")
+        self.assertEqual(solicitud.get_method(), "POST")
+        self.assertEqual(solicitud.get_header("Authorization"), "Bearer re_test_api_key")
+        self.assertEqual(abrir_url.call_args.kwargs["timeout"], 10)
+        cuerpo = json.loads(solicitud.data)
+        self.assertEqual(cuerpo["from"], "onboarding@resend.dev")
+        self.assertEqual(cuerpo["to"], ["reportes@example.com"])
+        self.assertEqual(
+            cuerpo["subject"],
+            f"Nuevo reporte ciudadano #{reporte.id} - AguaComunidad",
+        )
+        for campo in (
+            f"ID del reporte: {reporte.id}",
+            "Municipio: Zipaquirá",
+            "Barrio o vereda: Centro",
+            "Tipo de falla: fuga",
+            "Descripción:",
+            reporte.descripcion,
+            reporte.creado_en.isoformat(),
+        ):
+            self.assertIn(campo, cuerpo["text"])
+
+    def test_resend_error_de_autenticacion_no_expone_respuesta(self):
+        self.app.config.update(
+            EMAIL_PROVIDER="resend",
+            RESEND_API_KEY="re_test_api_key",
+            RESEND_FROM="onboarding@resend.dev",
+            EMAIL_REPORTS_TO="reportes@example.com",
+        )
+        reporte = ReporteCiudadano(
+            municipio="Zipaquirá",
+            barrio="Centro",
+            tipo_falla="fuga",
+            descripcion="Descripción privada",
+        )
+        db.session.add(reporte)
+        db.session.commit()
+        error_http = HTTPError(
+            "https://api.resend.com/emails",
+            401,
+            "Unauthorized",
+            None,
+            io.BytesIO(b"private provider response"),
+        )
+
+        with patch("app.services.notificaciones.urlopen", side_effect=error_http):
+            with self.assertRaises(EmailAvisoEnvioError) as error:
+                enviar_aviso_reporte(reporte)
+
+        self.assertEqual(error.exception.proveedor, "resend")
+        self.assertEqual(error.exception.estado_http, 401)
+        self.assertNotIn("re_test_api_key", str(error.exception))
+        self.assertNotIn("private provider response", str(error.exception))
+
+    def test_resend_falla_de_red_y_timeout_sin_exponer_detalles(self):
+        self.app.config.update(
+            EMAIL_PROVIDER="resend",
+            RESEND_API_KEY="re_test_api_key",
+            RESEND_FROM="onboarding@resend.dev",
+            EMAIL_REPORTS_TO="reportes@example.com",
+        )
+        reporte = ReporteCiudadano(
+            municipio="Zipaquirá",
+            barrio="Centro",
+            tipo_falla="fuga",
+            descripcion="Descripción privada",
+        )
+        db.session.add(reporte)
+        db.session.commit()
+
+        for error_envio in (URLError("detalle privado"), TimeoutError("detalle privado")):
+            with self.subTest(error=type(error_envio).__name__):
+                with patch("app.services.notificaciones.urlopen", side_effect=error_envio):
+                    with self.assertRaises(EmailAvisoEnvioError) as error:
+                        enviar_aviso_reporte(reporte)
+                self.assertEqual(error.exception.proveedor, "resend")
+                self.assertNotIn("detalle privado", str(error.exception))
+
+    def test_resend_aceptado_muestra_confirmacion_sin_asegurar_entrega(self):
+        self.app.config["EMAIL_PROVIDER"] = "resend"
+        with patch(
+            "app.blueprints.reportes.routes.enviar_aviso_reporte",
+            return_value="resend",
+        ) as enviar_aviso:
+            respuesta = self.client.post(
+                "/reporte-ciudadano",
+                data={
+                    "municipio_id": "1",
+                    "barrio": "Centro",
+                    "tipo_falla": "fuga",
+                    "descripcion": "Hay una fuga visible frente al parque central.",
+                    "sitio_web": "",
+                },
+                follow_redirects=True,
+            )
+
+        self.assertEqual(respuesta.status_code, 200)
+        self.assertIn(b"Resend acept", respuesta.data)
+        self.assertIn(b"no confirma la entrega", respuesta.data)
+        self.assertEqual(ReporteCiudadano.query.count(), 1)
+        enviar_aviso.assert_called_once()
+
+    def test_resend_sin_configuracion_no_intenta_enviar(self):
+        self.app.config.update(
+            EMAIL_PROVIDER="resend",
+            RESEND_API_KEY=None,
+            RESEND_FROM="onboarding@resend.dev",
+            EMAIL_REPORTS_TO="reportes@example.com",
+        )
+        reporte = ReporteCiudadano(
+            municipio="Zipaquirá",
+            barrio="Centro",
+            tipo_falla="fuga",
+            descripcion="Descripción privada",
+        )
+
+        with patch("app.services.notificaciones.urlopen") as abrir_url:
+            with self.assertRaises(EmailAvisoNoConfiguradoError):
+                enviar_aviso_reporte(reporte)
+
+        abrir_url.assert_not_called()
 
     def test_destinatario_predeterminado_de_reportes(self):
         self.assertEqual(self.app.config["EMAIL_REPORTS_TO"], "aguacomunidadsabana@gmail.com")

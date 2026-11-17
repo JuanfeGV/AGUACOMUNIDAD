@@ -21,6 +21,9 @@ class Config:
     SECRET_KEY = os.environ.get("SECRET_KEY", "clave-solo-para-desarrollo")
     SQLALCHEMY_DATABASE_URI = _url_base_de_datos()
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    EMAIL_PROVIDER = os.environ.get("EMAIL_PROVIDER", "smtp").strip().lower()
+    RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
+    RESEND_FROM = os.environ.get("RESEND_FROM")
     SMTP_SERVER = os.environ.get("SMTP_SERVER")
     SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
     SMTP_USE_TLS = os.environ.get("SMTP_USE_TLS", "1") == "1"
